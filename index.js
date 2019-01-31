@@ -1,9 +1,11 @@
 
 module.exports = gulpRequireTasks;
 
-
+const plugin = require('./package.json');
+const PluginError = require('plugin-error');
 const path = require('path');
 const requireDirectory = require('require-directory');
+const FwdRef = require('undertaker-forward-reference');
 
 
 const DEFAULT_OPTIONS = {
@@ -20,6 +22,12 @@ function gulpRequireTasks (options) {
   options = Object.assign({}, DEFAULT_OPTIONS, options);
 
   const gulp = options.gulp || require('gulp');
+  const gulp_version = gulp.series ? 4 : 3;
+
+  //
+  if (gulp_version === 4) {
+    gulp.registry(new FwdRef());
+  }
 
   // Recursively visiting all modules in the specified directory
   // and registering Gulp tasks.
@@ -47,12 +55,45 @@ function gulpRequireTasks (options) {
       );
     }
 
-    gulp.task(
-      taskName,
-      // @todo: deprecate `module.dep` in 2.0.0
-      module.deps || module.dep || [],
-      module.nativeTask || taskFunction
-    );
+    if (module.nativeTask && gulp_version === 4) {
+      const msg = `"${taskName}" can't be processed: Usage of "module.nativeTask" property is deprecated because of synchronous tasks are no longer supported in gulp v4. Use a task with explicit callback instead.`;
+
+      module.nativeTask = function(cb) {
+        cb(new PluginError(plugin.name, msg));
+        return;
+      };
+    }
+
+    const taskDeps = module.deps || module.dep || [];
+    const taskFn = module.nativeTask || taskFunction;
+
+    if (gulp_version === 4) {
+      if (taskDeps.length) {
+        if (undefined === module.fn) {
+          gulp.task(
+            taskName,
+            gulp.parallel(...taskDeps)
+          );
+        } else {
+          gulp.task(
+            taskName,
+            gulp.series(gulp.parallel(...taskDeps), function(callback) { taskFn(callback) })
+          );
+        }
+      } else {
+        gulp.task(
+          taskName,
+          taskFn
+        );
+      }
+    } else {
+      gulp.task(
+        taskName,
+        // @todo: deprecate `module.dep` in 2.0.0
+        taskDeps,
+        taskFn
+      );
+    }
 
 
     /**
@@ -135,12 +176,19 @@ function gulpRequireTasks (options) {
  * @returns {object}
  */
 function normalizeModule (module) {
+  if (undefined !== module.default) {
+    return {
+      fn: module.default,
+      deps: []
+    };
+  }
+
   if ('function' === typeof module) {
     return {
       fn: module,
       deps: []
     };
-  } else {
-    return module;
   }
+
+  return module;
 }
